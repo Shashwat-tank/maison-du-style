@@ -1097,10 +1097,11 @@ function HUD.init()
 		Visible = false,
 	}, gui)
 
+	-- Left side, stacked under the role label: the top-right is occupied by
+	-- Roblox's own player list.
 	local clueBoard = panel({
 		Size = UDim2.fromOffset(260, 56),
-		Position = UDim2.new(1, -12, 0, 12),
-		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(0, 12, 0, 56),
 		TextSize = 16,
 		Visible = false,
 	}, gui)
@@ -1114,6 +1115,7 @@ function HUD.init()
 	}, gui)
 
 	local banner = panel({
+		BackgroundTransparency = 0.1,
 		Size = UDim2.fromOffset(520, 110),
 		Position = UDim2.new(0.5, 0, 0.3, 0),
 		AnchorPoint = Vector2.new(0.5, 0.5),

@@ -14,6 +14,12 @@ A round-based murder mystery for Roblox with an original twist: a **clue system*
 4. When the round ends, the murderer is revealed and winners earn coins.
 
 ## Run it in Studio
+
+**No Rojo, no terminal?** See [`tools/README.md`](tools/README.md) — paste one
+generated script into Studio's Command Bar, or insert three `.rbxmx` model files.
+That is the fastest way to play it today.
+
+### With Rojo (recommended once you are iterating)
 1. Install [Rojo](https://rojo.space) (the VS Code extension or the CLI) and the Rojo plugin for Studio.
 2. In this folder run `rojo serve`.
 3. Open a new **Baseplate** place in Studio, click **Connect** in the Rojo plugin.

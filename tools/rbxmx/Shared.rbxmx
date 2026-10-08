@@ -1,0 +1,113 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Folder" referent="RBX4">
+    <Properties>
+      <string name="Name">Shared</string>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX1">
+      <Properties>
+        <string name="Name">Config</string>
+        <ProtectedString name="Source"><![CDATA[local RunService = game:GetService("RunService")
+
+local Config = {
+	-- Fewer players are needed in Studio so you can test with 2 local clients.
+	MinPlayers = RunService:IsStudio() and 2 or 3,
+
+	IntermissionSeconds = 20,
+	RoundSeconds = 180,
+	EndScreenSeconds = 8,
+	LobbyRespawnSeconds = 3,
+
+	-- Combat
+	StabRange = 7,
+	StabCooldown = 1,
+	ShotRange = 300,
+	ShotCooldown = 4,
+
+	-- Clues
+	ClueCount = 6,
+
+	Rewards = {
+		InnocentWin = 25,
+		MurdererWin = 50,
+	},
+
+	Roles = {
+		Murderer = "Murderer",
+		Detective = "Detective",
+		Innocent = "Innocent",
+	},
+
+	Winners = {
+		Murderer = "Murderer",
+		Innocents = "Innocents",
+	},
+
+	RemoteNames = { "RoleAssigned", "ClueFound", "RoundEnded", "Shoot" },
+}
+
+return Config
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX2">
+      <Properties>
+        <string name="Name">Remotes</string>
+        <ProtectedString name="Source"><![CDATA[local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Remotes = {}
+
+local function getFolder()
+	if RunService:IsServer() then
+		local folder = ReplicatedStorage:FindFirstChild("Remotes")
+		if not folder then
+			folder = Instance.new("Folder")
+			folder.Name = "Remotes"
+			folder.Parent = ReplicatedStorage
+		end
+		return folder
+	end
+	return ReplicatedStorage:WaitForChild("Remotes")
+end
+
+-- Server: creates the RemoteEvent if missing. Client: waits for it to exist.
+function Remotes.get(name: string): RemoteEvent
+	local folder = getFolder()
+	if RunService:IsServer() then
+		local remote = folder:FindFirstChild(name)
+		if not remote then
+			remote = Instance.new("RemoteEvent")
+			remote.Name = name
+			remote.Parent = folder
+		end
+		return remote
+	end
+	return folder:WaitForChild(name)
+end
+
+return Remotes
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX3">
+      <Properties>
+        <string name="Name">Util</string>
+        <ProtectedString name="Source"><![CDATA[local Util = {}
+
+local rng = Random.new()
+
+-- In-place Fisher-Yates shuffle. Returns the same list for chaining.
+function Util.shuffle(list: { any }): { any }
+	for i = #list, 2, -1 do
+		local j = rng:NextInteger(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+	return list
+end
+
+return Util
+]]></ProtectedString>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

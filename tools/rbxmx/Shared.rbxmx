@@ -24,7 +24,14 @@ local Config = {
 	ShotCooldown = 4,
 
 	-- Clues
-	ClueCount = 6,
+	ClueCount = 10,
+
+	-- Arena. HalfSize is half the floor width, so the floor is twice this across.
+	-- Raise it for a bigger map; cover, spawns and clue spots scale with it.
+	Arena = {
+		HalfSize = 110,
+		WallHeight = 26,
+	},
 
 	Rewards = {
 		InnocentWin = 25,

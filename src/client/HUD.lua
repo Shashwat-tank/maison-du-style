@@ -1,0 +1,191 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+
+local HUD = {}
+
+local WHITE = Color3.new(1, 1, 1)
+local PANEL = Color3.fromRGB(20, 20, 28)
+
+local ROLE_STYLE = {
+	[Config.Roles.Murderer] = {
+		color = Color3.fromRGB(220, 60, 60),
+		blurb = "Eliminate everyone. Destroy clues. Stay hidden.",
+	},
+	[Config.Roles.Detective] = {
+		color = Color3.fromRGB(80, 140, 255),
+		blurb = "Find the murderer. A wrong shot kills you too.",
+	},
+	[Config.Roles.Innocent] = {
+		color = Color3.fromRGB(90, 200, 120),
+		blurb = "Collect clues and survive. Work out who the murderer is.",
+	},
+}
+
+local function make(className: string, props: { [string]: any }, parent: Instance): any
+	local instance = Instance.new(className)
+	for key, value in pairs(props) do
+		instance[key] = value
+	end
+	instance.Parent = parent
+	return instance
+end
+
+local function panel(props: { [string]: any }, parent: Instance): TextLabel
+	props.BackgroundColor3 = props.BackgroundColor3 or PANEL
+	props.BackgroundTransparency = props.BackgroundTransparency or 0.3
+	props.TextColor3 = props.TextColor3 or WHITE
+	props.Font = props.Font or Enum.Font.GothamBold
+	props.TextSize = props.TextSize or 18
+	props.TextWrapped = true
+	local label = make("TextLabel", props, parent)
+	make("UICorner", { CornerRadius = UDim.new(0, 8) }, label)
+	return label
+end
+
+function HUD.init()
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+	local gui = make("ScreenGui", { Name = "MysteryHUD", ResetOnSpawn = false }, playerGui)
+
+	local status = panel({
+		Size = UDim2.fromOffset(380, 40),
+		Position = UDim2.new(0.5, 0, 0, 12),
+		AnchorPoint = Vector2.new(0.5, 0),
+	}, gui)
+
+	local roleLabel = panel({
+		Size = UDim2.fromOffset(220, 36),
+		Position = UDim2.new(0, 12, 0, 12),
+		Visible = false,
+	}, gui)
+
+	local clueBoard = panel({
+		Size = UDim2.fromOffset(260, 56),
+		Position = UDim2.new(1, -12, 0, 12),
+		AnchorPoint = Vector2.new(1, 0),
+		TextSize = 16,
+		Visible = false,
+	}, gui)
+
+	local toast = panel({
+		Size = UDim2.fromOffset(340, 36),
+		Position = UDim2.new(0.5, 0, 1, -90),
+		AnchorPoint = Vector2.new(0.5, 1),
+		TextSize = 16,
+		Visible = false,
+	}, gui)
+
+	local banner = panel({
+		Size = UDim2.fromOffset(520, 110),
+		Position = UDim2.new(0.5, 0, 0.3, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		TextSize = 34,
+		Visible = false,
+	}, gui)
+	local bannerSub = make("TextLabel", {
+		Size = UDim2.new(1, -20, 0, 40),
+		Position = UDim2.new(0, 10, 1, -48),
+		BackgroundTransparency = 1,
+		TextColor3 = WHITE,
+		Font = Enum.Font.Gotham,
+		TextSize = 18,
+		TextWrapped = true,
+		Text = "",
+	}, banner)
+	banner.TextYAlignment = Enum.TextYAlignment.Top
+
+	local function refreshStatus()
+		local state = ReplicatedStorage:GetAttribute("State")
+		local timeLeft = ReplicatedStorage:GetAttribute("TimeLeft") or 0
+		local text
+		if state == "Waiting" then
+			text = string.format("Waiting for players (%d/%d)", #Players:GetPlayers(), Config.MinPlayers)
+		elseif state == "Intermission" then
+			text = string.format("Next round in %d", timeLeft)
+		elseif state == "Starting" then
+			text = "Round starting..."
+		elseif state == "InRound" then
+			text = string.format("Time left  %d:%02d", math.floor(timeLeft / 60), timeLeft % 60)
+		elseif state == "Ended" then
+			text = "Round over"
+		else
+			text = "Connecting..."
+		end
+		status.Text = text
+	end
+
+	ReplicatedStorage:GetAttributeChangedSignal("State"):Connect(refreshStatus)
+	ReplicatedStorage:GetAttributeChangedSignal("TimeLeft"):Connect(refreshStatus)
+	Players.PlayerAdded:Connect(refreshStatus)
+	Players.PlayerRemoving:Connect(function()
+		task.defer(refreshStatus)
+	end)
+	refreshStatus()
+
+	-- Each banner/toast gets a token so an older timer can't hide a newer message.
+	local bannerToken = 0
+	local toastToken = 0
+
+	local function showBanner(title: string, subtitle: string, color: Color3, seconds: number)
+		bannerToken += 1
+		local token = bannerToken
+		banner.Text = title
+		banner.TextColor3 = color
+		bannerSub.Text = subtitle
+		banner.Visible = true
+		task.delay(seconds, function()
+			if token == bannerToken then
+				banner.Visible = false
+			end
+		end)
+	end
+
+	local function showToast(message: string)
+		toastToken += 1
+		local token = toastToken
+		toast.Text = message
+		toast.Visible = true
+		task.delay(5, function()
+			if token == toastToken then
+				toast.Visible = false
+			end
+		end)
+	end
+
+	local api = {}
+
+	function api.showRole(role: string)
+		local style = ROLE_STYLE[role] or ROLE_STYLE[Config.Roles.Innocent]
+		roleLabel.Text = "You are: " .. role
+		roleLabel.TextColor3 = style.color
+		roleLabel.Visible = true
+		clueBoard.Text = "Murderer's name:\n(no clues found yet)"
+		clueBoard.Visible = true
+		showBanner(role, style.blurb, style.color, 5)
+	end
+
+	function api.showClue(message: string, mask: string?)
+		showToast(message)
+		if mask then
+			clueBoard.Text = "Murderer's name:\n" .. mask
+		end
+	end
+
+	function api.showEnd(winner: string, murdererName: string)
+		local innocentsWon = winner == Config.Winners.Innocents
+		showBanner(
+			innocentsWon and "Innocents win!" or "The murderer wins!",
+			"The murderer was " .. murdererName,
+			innocentsWon and ROLE_STYLE[Config.Roles.Innocent].color or ROLE_STYLE[Config.Roles.Murderer].color,
+			Config.EndScreenSeconds
+		)
+		roleLabel.Visible = false
+		clueBoard.Visible = false
+	end
+
+	return api
+end
+
+return HUD

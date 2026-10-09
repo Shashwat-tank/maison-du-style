@@ -1,0 +1,78 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Folder" referent="RBX3">
+    <Properties>
+      <string name="Name">Shared</string>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX1">
+      <Properties>
+        <string name="Name">Config</string>
+        <ProtectedString name="Source"><![CDATA[local Config = {
+	-- One player is enough: a solo race is a time trial.
+	MinPlayers = 1,
+
+	IntermissionSeconds = 15,
+	CountdownSeconds = 3,
+	RaceSeconds = 240,
+	-- Once someone finishes, everyone else has at most this long left.
+	FinishWindowSeconds = 30,
+	EndScreenSeconds = 8,
+
+	-- Stages per course. Each race draws a fresh random course, getting harder
+	-- toward the finish.
+	StageCount = 8,
+
+	Rewards = {
+		Places = { 50, 30, 20 }, -- coins for 1st, 2nd, 3rd
+		Finish = 10, -- coins for finishing outside the top places
+		PerCheckpoint = 1, -- consolation coins for racers who do not finish
+	},
+
+	RemoteNames = { "PlayerFinished", "RaceResults" },
+}
+
+return Config
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX2">
+      <Properties>
+        <string name="Name">Remotes</string>
+        <ProtectedString name="Source"><![CDATA[local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Remotes = {}
+
+local function getFolder()
+	if RunService:IsServer() then
+		local folder = ReplicatedStorage:FindFirstChild("Remotes")
+		if not folder then
+			folder = Instance.new("Folder")
+			folder.Name = "Remotes"
+			folder.Parent = ReplicatedStorage
+		end
+		return folder
+	end
+	return ReplicatedStorage:WaitForChild("Remotes")
+end
+
+-- Server: creates the RemoteEvent if missing. Client: waits for it to exist.
+function Remotes.get(name: string): RemoteEvent
+	local folder = getFolder()
+	if RunService:IsServer() then
+		local remote = folder:FindFirstChild(name)
+		if not remote then
+			remote = Instance.new("RemoteEvent")
+			remote.Name = name
+			remote.Parent = folder
+		end
+		return remote
+	end
+	return folder:WaitForChild(name)
+end
+
+return Remotes
+]]></ProtectedString>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

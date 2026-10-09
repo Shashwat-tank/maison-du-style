@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Generate Studio install bundles from src/.
+"""Generate Studio install bundles for each game under games/.
 
-Two outputs, both built from the same source so they cannot drift apart:
+Two outputs per game, both built from the same source so they cannot drift apart:
 
-  tools/StudioInstaller.luau   one script to paste into the Studio Command Bar
-  tools/rbxmx/*.rbxmx          model files for Explorer -> Insert from File
+  games/<game>/install/StudioInstaller.luau   one script for the Studio Command Bar
+  games/<game>/install/*.rbxmx                model files for Explorer -> Insert from File
 
-Regenerate after changing anything under src/:
-    python3 tools/build_installer.py
+Regenerate after changing anything under a game's src/:
+    python3 tools/build_installer.py              # every game
+    python3 tools/build_installer.py obby-race    # just one
 """
 
 import pathlib
@@ -15,9 +16,19 @@ import sys
 from xml.sax.saxutils import escape
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SRC = ROOT / "src"
-OUT_LUAU = ROOT / "tools" / "StudioInstaller.luau"
-OUT_RBXMX = ROOT / "tools" / "rbxmx"
+GAMES_DIR = ROOT / "games"
+
+# Per-game text for the installer header and its closing message.
+GAMES = {
+    "murder-mystery": {
+        "title": "Murder Mystery",
+        "play": "Test tab -> Clients and Servers -> Players: 2 -> Start",
+    },
+    "obby-race": {
+        "title": "Obby Race",
+        "play": "Test tab -> Play (solo works; Clients and Servers -> Players: 2+ to race others)",
+    },
+}
 
 # Mirrors default.project.json: each source directory maps onto the Studio
 # instance Rojo would create for it. A directory with an `init` entry point
@@ -32,10 +43,10 @@ GROUPS = [
 ]
 
 
-def collect():
+def collect(src):
     groups = []
     for group in GROUPS:
-        directory = SRC / group["dir"]
+        directory = src / group["dir"]
         if not directory.is_dir():
             sys.exit("missing source directory: %s" % directory)
 
@@ -74,7 +85,7 @@ def long_string(text):
 
 
 LUAU_HEADER = '''--!nocheck
--- Maison du Style - Murder Mystery: one-paste Studio installer.
+-- Maison du Style - %(title)s: one-paste Studio installer.
 --
 -- GENERATED FILE - do not edit by hand.
 -- Regenerate with: python3 tools/build_installer.py
@@ -83,10 +94,10 @@ LUAU_HEADER = '''--!nocheck
 --   1. Open Roblox Studio and create a new Baseplate place.
 --   2. View tab -> Command Bar. Also open View -> Output to see errors later.
 --   3. Paste this whole file into the Command Bar and press Enter.
---   4. Test tab -> Clients and Servers -> Players: 2 -> Start.
+--   4. %(play)s.
 --
 -- If the paste collapses into one line, the Command Bar has stripped the
--- newlines and this will not work. Use the .rbxmx files in tools/rbxmx instead.
+-- newlines and this will not work. Use the .rbxmx files next to this one instead.
 --
 -- Re-running this is safe: it replaces its own previous install. It never
 -- touches Workspace, so a map you built yourself is left alone.
@@ -142,16 +153,16 @@ for _, entry in ipairs(ENTRIES) do
 \ttable.insert(created, entry.root .. "." .. prefix .. entry.name)
 end
 
-print(string.format("Murder Mystery installed - %d instances created:", #created))
+print(string.format("%(title)s installed - %%d instances created:", #created))
 for _, path in ipairs(created) do
 \tprint("   " .. path)
 end
-print("Next: Test tab -> Clients and Servers -> Players: 2 -> Start")
+print("Next: %(play)s")
 '''
 
 
-def render_luau(groups):
-    out = [LUAU_HEADER, "\nlocal ENTRIES = {"]
+def render_luau(groups, game):
+    out = [LUAU_HEADER % game, "\nlocal ENTRIES = {"]
 
     def emit(root, parent, name, cls, source):
         out.append("\t{")
@@ -171,7 +182,7 @@ def render_luau(groups):
                  "ModuleScript", module["source"])
 
     out.append("}")
-    out.append(LUAU_FOOTER)
+    out.append(LUAU_FOOTER % game)
     return "\n".join(out)
 
 
@@ -212,18 +223,30 @@ def render_rbxmx(group):
     return RBXMX_OPEN + "\n".join(body) + "\n</roblox>\n"
 
 
-if __name__ == "__main__":
-    groups = collect()
+def build(name):
+    game = GAMES[name]
+    base = GAMES_DIR / name
+    out = base / "install"
+    groups = collect(base / "src")
+    out.mkdir(parents=True, exist_ok=True)
 
-    OUT_LUAU.write_text(render_luau(groups))
+    luau = out / "StudioInstaller.luau"
+    luau.write_text(render_luau(groups, game))
     total = sum(1 + len(g["modules"]) for g in groups)
     print("wrote %s (%d instances, %d bytes)"
-          % (OUT_LUAU.relative_to(ROOT), total, OUT_LUAU.stat().st_size))
+          % (luau.relative_to(ROOT), total, luau.stat().st_size))
 
-    OUT_RBXMX.mkdir(parents=True, exist_ok=True)
     for group in groups:
-        path = OUT_RBXMX / ("%s.rbxmx" % group["name"])
+        path = out / ("%s.rbxmx" % group["name"])
         path.write_text(render_rbxmx(group))
         print("wrote %s (-> %s, %d instances, %d bytes)"
               % (path.relative_to(ROOT), group["root"],
                  1 + len(group["modules"]), path.stat().st_size))
+
+
+if __name__ == "__main__":
+    names = sys.argv[1:] or sorted(GAMES)
+    for name in names:
+        if name not in GAMES:
+            sys.exit("unknown game %r; known: %s" % (name, ", ".join(sorted(GAMES))))
+        build(name)

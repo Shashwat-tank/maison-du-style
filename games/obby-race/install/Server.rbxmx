@@ -1,0 +1,803 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Script" referent="RBX6">
+    <Properties>
+      <string name="Name">Server</string>
+      <ProtectedString name="Source"><![CDATA[local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+
+-- Create every remote up front so clients can WaitForChild them.
+for _, name in ipairs(Config.RemoteNames) do
+	Remotes.get(name)
+end
+
+local CourseBuilder = require(script.CourseBuilder)
+local NoPlayerCollisions = require(script.NoPlayerCollisions)
+local PlayerStats = require(script.PlayerStats)
+local RaceManager = require(script.RaceManager)
+
+CourseBuilder.ensureLobby()
+NoPlayerCollisions.init()
+PlayerStats.init()
+RaceManager.start()
+]]></ProtectedString>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX1">
+      <Properties>
+        <string name="Name">CourseBuilder</string>
+        <ProtectedString name="Source"><![CDATA[-- Builds a fresh random course for every race. The course runs along +Z, high in
+-- the sky above the lobby. Each stage ends in a checkpoint pad; the last pad is
+-- the finish.
+--
+-- Moving obstacles are animated on each client (see ObstacleAnimator), driven by
+-- the shared server clock, so they move smoothly and line up for everyone. They
+-- are tagged with attributes here:
+--   Hazard = true                  touching it sends you back to your checkpoint
+--   Anim = "Spin"  Speed           rotates about its own vertical axis (deg/s)
+--   Anim = "Fade" | "Laser"        on for OnFraction of each Period, offset by Phase
+--
+-- Distances are tuned for the default character: a running jump clears about
+-- 8.5 studs on the flat and rises about 7, so gaps top out at 6.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("Shared").Config)
+
+local CourseBuilder = {}
+
+local ORIGIN = Vector3.new(0, 150, 300)
+local START_SIZE = Vector3.new(40, 1, 24)
+local PAD_SIZE = Vector3.new(24, 1, 10)
+local FINISH_SIZE = Vector3.new(32, 1, 18)
+
+local HAZARD_COLOR = Color3.fromRGB(255, 70, 40)
+local DARK = Color3.fromRGB(45, 45, 55)
+local PAD_COLOR = Color3.fromRGB(85, 200, 110)
+local GOLD = Color3.fromRGB(255, 200, 60)
+
+export type Checkpoint = { top: Vector3, size: Vector3 }
+export type Course = {
+	folder: Folder,
+	gate: BasePart,
+	stageCount: number,
+	stageNames: { string },
+	checkpoints: { [number]: Checkpoint }, -- 0 is the start pad, stageCount is the finish
+}
+
+type Builder = { folder: Folder, rng: Random, color: Color3 }
+
+type PartSpec = {
+	name: string,
+	size: Vector3,
+	cframe: CFrame,
+	color: Color3?,
+	material: Enum.Material?,
+	transparency: number?,
+	canCollide: boolean?,
+	attributes: { [string]: any }?,
+	class: string?,
+}
+
+local function lerp(a: number, b: number, t: number): number
+	return a + (b - a) * t
+end
+
+-- Attributes are set before parenting so clients receive the part fully tagged.
+local function block(b: Builder, spec: PartSpec): BasePart
+	local part = Instance.new(spec.class or "Part") :: BasePart
+	part.Name = spec.name
+	part.Anchored = true
+	part.Size = spec.size
+	part.CFrame = spec.cframe
+	part.Color = spec.color or b.color
+	part.Material = spec.material or Enum.Material.SmoothPlastic
+	part.Transparency = spec.transparency or 0
+	if spec.canCollide ~= nil then
+		part.CanCollide = spec.canCollide
+	end
+	for key, value in pairs(spec.attributes or {}) do
+		part:SetAttribute(key, value)
+	end
+	part.Parent = b.folder
+	return part
+end
+
+-- A platform whose top surface is centred on `top`.
+local function slab(b: Builder, name: string, size: Vector3, top: Vector3, color: Color3?, material: Enum.Material?): BasePart
+	return block(b, {
+		name = name,
+		size = size,
+		cframe = CFrame.new(top - Vector3.new(0, size.Y / 2, 0)),
+		color = color,
+		material = material,
+	})
+end
+
+local function sign(part: BasePart, text: string, color: Color3)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromScale(14, 3)
+	gui.StudsOffset = Vector3.new(0, 7, 0)
+	gui.MaxDistance = 150
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextScaled = true
+	label.Font = Enum.Font.GothamBlack
+	label.TextColor3 = color
+	label.TextStrokeTransparency = 0.3
+	label.Parent = gui
+	gui.Parent = part
+end
+
+-- Each stage takes the point where it starts (centre of the entry edge, at
+-- standing height) and a difficulty from 0 to 1, and returns where the next
+-- checkpoint pad should begin.
+type StageBuild = (b: Builder, start: Vector3, difficulty: number) -> Vector3
+
+local function jumps(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local size = lerp(7, 4.5, d)
+	local rises = { -1, 0, 0, 1, 2 }
+	local function gap(rising: boolean): number
+		local g = rng:NextNumber(lerp(2.5, 4, d), lerp(4, 6, d))
+		return rising and math.min(g, 4) or g
+	end
+
+	local x, y, z = 0, s.Y, s.Z + gap(false)
+	for i = 1, 7 do
+		slab(b, "Jump" .. i, Vector3.new(size, 1, size), Vector3.new(x, y, z + size / 2))
+		local rise = rises[rng:NextInteger(1, #rises)]
+		y += rise
+		x = math.clamp(x + rng:NextNumber(-0.8, 0.8) * size, -9, 9)
+		z += size + gap(rise > 0)
+	end
+	return Vector3.new(0, y, z)
+end
+
+local function lava(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local size = lerp(5, 3.5, d)
+	local x, z = 0, s.Z + rng:NextNumber(2.5, 4)
+	for i = 1, 9 do
+		slab(b, "Stone" .. i, Vector3.new(size, 2, size), Vector3.new(x, s.Y, z + size / 2), nil, Enum.Material.Slate)
+		z += size + rng:NextNumber(lerp(2.5, 4, d), lerp(3.5, 5.5, d))
+		x = math.clamp(x + rng:NextNumber(-1, 1) * size, -9, 9)
+	end
+	local length = z - s.Z
+	block(b, {
+		name = "Lava",
+		size = Vector3.new(24, 1, length),
+		cframe = CFrame.new(0, s.Y - 2, s.Z + length / 2),
+		color = HAZARD_COLOR,
+		material = Enum.Material.Neon,
+		attributes = { Hazard = true },
+	})
+	return Vector3.new(0, s.Y, z)
+end
+
+local function spinners(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local count = 2 + math.floor(d * 2.99)
+	local spacing = 22
+	local length = count * spacing + 8
+	-- The floor is exactly as wide as the sweep, so there is no way around a bar.
+	slab(b, "Floor", Vector3.new(spacing, 1, length), Vector3.new(0, s.Y, s.Z + length / 2))
+
+	local speed = lerp(70, 140, d)
+	for i = 1, count do
+		local center = Vector3.new(0, s.Y, s.Z + 4 + (i - 0.5) * spacing)
+		block(b, { name = "Hub" .. i, size = Vector3.new(2, 3, 2), cframe = CFrame.new(center + Vector3.new(0, 1.5, 0)), color = DARK })
+
+		-- Later stages turn some single bars into crosses, spun a little slower so
+		-- the gap between sweeps stays longer than a jump.
+		local arms = (d > 0.5 and i % 2 == 0) and 2 or 1
+		local direction = i % 2 == 0 and 1 or -1
+		local phase = rng:NextNumber(0, 360)
+		for arm = 1, arms do
+			block(b, {
+				name = "Spinner" .. i .. "_" .. arm,
+				size = Vector3.new(spacing - 1, 1, 1),
+				cframe = CFrame.new(center + Vector3.new(0, 1.3, 0)) * CFrame.Angles(0, math.rad(phase + (arm - 1) * 90), 0),
+				color = HAZARD_COLOR,
+				material = Enum.Material.Neon,
+				canCollide = false,
+				attributes = { Hazard = true, Anim = "Spin", Speed = direction * speed / arms ^ 0.5 },
+			})
+		end
+	end
+	return Vector3.new(0, s.Y, s.Z + length)
+end
+
+local function vanishing(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local period = lerp(3.2, 2.4, d)
+	local x, z = 0, s.Z + 3
+	for i = 1, 7 do
+		block(b, {
+			name = "Tile" .. i,
+			size = Vector3.new(6, 1, 6),
+			cframe = CFrame.new(x, s.Y - 0.5, z + 3),
+			material = Enum.Material.Glass,
+			-- Each tile lags the one before it, so the solid window travels
+			-- forward at roughly running speed.
+			attributes = { Anim = "Fade", Period = period, Phase = (-0.15 * i) % 1, OnFraction = 0.6 },
+		})
+		z += 6 + 2.5
+		x = math.clamp(x + rng:NextNumber(-4, 4), -8, 8)
+	end
+	return Vector3.new(0, s.Y, z + 0.5)
+end
+
+local function tightrope(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local width = lerp(2, 1.2, d)
+	local segments = 4
+	local side = rng:NextInteger(0, 1) == 0 and -1 or 1
+	local from = Vector3.new(0, s.Y, s.Z)
+	for i = 1, segments do
+		local to = Vector3.new(i == segments and 0 or side * 7, s.Y, from.Z + 12)
+		side = -side
+		local mid = (from + to) / 2 - Vector3.new(0, 0.5, 0)
+		block(b, {
+			name = "Beam" .. i,
+			size = Vector3.new(width, 1, (to - from).Magnitude + 1),
+			cframe = CFrame.lookAt(mid, mid + (to - from)),
+		})
+		slab(b, "Perch" .. i, Vector3.new(4, 1, 4), to)
+		from = to
+	end
+	return Vector3.new(0, s.Y, from.Z + 2)
+end
+
+local function lasers(b: Builder, s: Vector3, d: number): Vector3
+	local rng = b.rng
+	local count = 3 + math.floor(d * 2.99)
+	local spacing = 12
+	local length = count * spacing + 6
+	slab(b, "Floor", Vector3.new(12, 1, length), Vector3.new(0, s.Y, s.Z + length / 2))
+
+	local period = lerp(2.4, 1.8, d)
+	for i = 1, count do
+		local z = s.Z + 3 + (i - 0.5) * spacing
+		for _, side in ipairs({ -1, 1 }) do
+			block(b, { name = "Emitter", size = Vector3.new(1, 10, 1), cframe = CFrame.new(side * 6.5, s.Y + 5, z), color = DARK })
+		end
+		-- Taller than a jump can clear, so the only way through is timing.
+		block(b, {
+			name = "Laser" .. i,
+			size = Vector3.new(12, 9, 0.4),
+			cframe = CFrame.new(0, s.Y + 4.5, z),
+			color = HAZARD_COLOR,
+			material = Enum.Material.Neon,
+			transparency = 0.2,
+			canCollide = false,
+			attributes = { Hazard = true, Anim = "Laser", Period = period, Phase = rng:NextNumber(), OnFraction = 0.5 },
+		})
+	end
+	return Vector3.new(0, s.Y, s.Z + length)
+end
+
+local function climb(b: Builder, s: Vector3, _d: number): Vector3
+	local function truss(bottom: Vector3, height: number)
+		block(b, {
+			class = "TrussPart",
+			name = "Truss",
+			size = Vector3.new(2, height, 2),
+			cframe = CFrame.new(bottom + Vector3.new(0, height / 2, 0)),
+			color = DARK,
+		})
+	end
+
+	local y0 = s.Y
+	slab(b, "Base", Vector3.new(12, 1, 8), Vector3.new(0, y0, s.Z + 4))
+	truss(Vector3.new(0, y0, s.Z + 9), 14)
+	local y1 = y0 + 14
+	slab(b, "Ledge1", Vector3.new(8, 1, 6), Vector3.new(0, y1, s.Z + 13))
+	slab(b, "Ledge2", Vector3.new(8, 1, 8), Vector3.new(0, y1, s.Z + 23))
+	truss(Vector3.new(0, y1, s.Z + 28), 12)
+	local y2 = y1 + 12
+	slab(b, "Ledge3", Vector3.new(8, 1, 6), Vector3.new(0, y2, s.Z + 32))
+	return Vector3.new(0, y2, s.Z + 35)
+end
+
+local WARMUP = { name = "Jumps", build = jumps :: StageBuild }
+local STAGES = {
+	WARMUP,
+	{ name = "Lava Floor", build = lava :: StageBuild },
+	{ name = "Spinners", build = spinners :: StageBuild },
+	{ name = "Vanishing Tiles", build = vanishing :: StageBuild },
+	{ name = "Tightrope", build = tightrope :: StageBuild },
+	{ name = "Laser Hall", build = lasers :: StageBuild },
+	{ name = "Tower Climb", build = climb :: StageBuild },
+}
+
+-- Always open with the warm-up, then deal stages from a shuffled bag so every
+-- type appears before any repeats, and never the same type twice in a row.
+local function chooseStages(rng: Random, count: number)
+	local order = { WARMUP }
+	local bag = {}
+	while #order < count do
+		if #bag == 0 then
+			bag = table.clone(STAGES)
+			for i = #bag, 2, -1 do
+				local j = rng:NextInteger(1, i)
+				bag[i], bag[j] = bag[j], bag[i]
+			end
+		end
+		local pick = table.remove(bag)
+		if pick == order[#order] and #bag > 0 then
+			bag[1], pick = pick, bag[1]
+		end
+		table.insert(order, pick)
+	end
+	return order
+end
+
+function CourseBuilder.build(seed: number): Course
+	local existing = workspace:FindFirstChild("Course")
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = "Course"
+	local rng = Random.new(seed)
+	local count = Config.StageCount
+	local stages = chooseStages(rng, count)
+
+	local b: Builder = { folder = folder, rng = rng, color = Color3.new(1, 1, 1) }
+	local checkpoints: { [number]: Checkpoint } = {}
+	local names = {}
+
+	local start = slab(b, "Start", START_SIZE, ORIGIN + Vector3.new(0, 0, START_SIZE.Z / 2), Color3.fromRGB(90, 90, 110))
+	sign(start, "Stage 1 · " .. stages[1].name, Color3.new(1, 1, 1))
+	checkpoints[0] = { top = ORIGIN + Vector3.new(0, 0, START_SIZE.Z / 2), size = START_SIZE }
+	local gate = block(b, {
+		name = "StartGate",
+		size = Vector3.new(START_SIZE.X, 14, 1),
+		cframe = CFrame.new(ORIGIN + Vector3.new(0, 7, START_SIZE.Z - 0.5)),
+		color = Color3.fromRGB(120, 200, 255),
+		material = Enum.Material.Glass,
+		transparency = 0.6,
+	})
+
+	local cursor = ORIGIN + Vector3.new(0, 0, START_SIZE.Z)
+	for i, stage in ipairs(stages) do
+		names[i] = stage.name
+		b.color = Color3.fromHSV((i - 1) / count, 0.45, 0.95)
+		local exit = stage.build(b, cursor, (i - 1) / math.max(count - 1, 1))
+
+		local isFinish = i == count
+		local size = isFinish and FINISH_SIZE or PAD_SIZE
+		local top = Vector3.new(0, exit.Y, exit.Z + size.Z / 2)
+		local pad = slab(b, isFinish and "Finish" or ("Checkpoint" .. i), size, top, isFinish and GOLD or PAD_COLOR)
+		checkpoints[i] = { top = top, size = size }
+
+		if isFinish then
+			pad.Material = Enum.Material.Neon
+			sign(pad, "FINISH", GOLD)
+		else
+			sign(pad, string.format("Stage %d · %s", i + 1, stages[i + 1].name), Color3.new(1, 1, 1))
+		end
+		cursor = Vector3.new(0, exit.Y, exit.Z + size.Z)
+	end
+
+	folder.Parent = workspace
+
+	ReplicatedStorage:SetAttribute("StageCount", count)
+	ReplicatedStorage:SetAttribute("StageNames", table.concat(names, "|"))
+
+	return {
+		folder = folder,
+		gate = gate,
+		stageCount = count,
+		stageNames = names,
+		checkpoints = checkpoints,
+	}
+end
+
+-- A plain lobby, only if the place does not already have a spawn.
+function CourseBuilder.ensureLobby()
+	if workspace:FindFirstChildWhichIsA("SpawnLocation", true) then
+		return
+	end
+	local lobby = Instance.new("Folder")
+	lobby.Name = "Lobby"
+	local b: Builder = { folder = lobby, rng = Random.new(), color = Color3.fromRGB(70, 70, 90) }
+	slab(b, "Floor", Vector3.new(80, 1, 80), Vector3.new(0, 0, 0))
+
+	local spawn = Instance.new("SpawnLocation")
+	spawn.Anchored = true
+	spawn.Neutral = true
+	spawn.Duration = 0
+	spawn.Size = Vector3.new(12, 1, 12)
+	spawn.Position = Vector3.new(0, 0.5, 0)
+	spawn.Parent = lobby
+	lobby.Parent = workspace
+end
+
+return CourseBuilder
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX2">
+      <Properties>
+        <string name="Name">NoPlayerCollisions</string>
+        <ProtectedString name="Source"><![CDATA[-- Racers pass through each other, so nobody can block a narrow beam or shove
+-- someone off a platform.
+local Players = game:GetService("Players")
+local PhysicsService = game:GetService("PhysicsService")
+
+local NoPlayerCollisions = {}
+
+local GROUP = "Racers"
+
+local function assign(instance: Instance)
+	if instance:IsA("BasePart") then
+		instance.CollisionGroup = GROUP
+	end
+end
+
+local function onCharacter(character: Model)
+	for _, descendant in ipairs(character:GetDescendants()) do
+		assign(descendant)
+	end
+	character.DescendantAdded:Connect(assign)
+end
+
+local function onPlayer(player: Player)
+	player.CharacterAdded:Connect(onCharacter)
+	if player.Character then
+		onCharacter(player.Character)
+	end
+end
+
+function NoPlayerCollisions.init()
+	if not PhysicsService:IsCollisionGroupRegistered(GROUP) then
+		PhysicsService:RegisterCollisionGroup(GROUP)
+	end
+	PhysicsService:CollisionGroupSetCollidable(GROUP, GROUP, false)
+
+	Players.PlayerAdded:Connect(onPlayer)
+	for _, player in ipairs(Players:GetPlayers()) do
+		onPlayer(player)
+	end
+end
+
+return NoPlayerCollisions
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX3">
+      <Properties>
+        <string name="Name">PlayerStats</string>
+        <ProtectedString name="Source"><![CDATA[-- Wins and Coins on the in-game leaderboard. Session-only for now: they reset
+-- when the player leaves. Saving them is a DataStore job for later.
+local Players = game:GetService("Players")
+
+local PlayerStats = {}
+
+local STATS = { "Wins", "Coins" }
+
+local function setup(player: Player)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	for _, name in ipairs(STATS) do
+		local value = Instance.new("IntValue")
+		value.Name = name
+		value.Parent = leaderstats
+	end
+	leaderstats.Parent = player
+end
+
+function PlayerStats.init()
+	Players.PlayerAdded:Connect(setup)
+	for _, player in ipairs(Players:GetPlayers()) do
+		setup(player)
+	end
+end
+
+function PlayerStats.add(player: Player, stat: string, amount: number)
+	local leaderstats = player:FindFirstChild("leaderstats")
+	local value = leaderstats and leaderstats:FindFirstChild(stat)
+	if value then
+		value.Value += amount
+	end
+end
+
+return PlayerStats
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX4">
+      <Properties>
+        <string name="Name">RaceManager</string>
+        <ProtectedString name="Source"><![CDATA[-- The race loop: wait for players, build a course, count down, race, award.
+--
+-- Progress is server-authoritative: ten times a second each racer's position is
+-- checked against their *next* checkpoint only, so checkpoints must be reached
+-- in order and nobody can skip to the finish. Clients never report progress.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+
+local CourseBuilder = require(script.Parent.CourseBuilder)
+local PlayerStats = require(script.Parent.PlayerStats)
+local RoundState = require(script.Parent.RoundState)
+
+local RaceManager = {}
+
+type Racer = { checkpoint: number, place: number?, time: number? }
+
+local course: CourseBuilder.Course? = nil
+local racers: { [Player]: Racer } = {}
+
+local SPAWN_HEIGHT = 3.5
+
+local function respawnPoint(index: number): Vector3
+	assert(course, "no course")
+	return course.checkpoints[index].top + Vector3.new(0, SPAWN_HEIGHT, 0)
+end
+
+local function setCheckpoint(player: Player, racer: Racer, index: number)
+	racer.checkpoint = index
+	player:SetAttribute("Checkpoint", index)
+	player:SetAttribute("RespawnAt", respawnPoint(index))
+end
+
+-- Facing down the course (+Z).
+local function place(player: Player, position: Vector3)
+	pcall(player.RequestStreamAroundAsync, player, position)
+	local character = player.Character
+	if character and character:FindFirstChild("HumanoidRootPart") then
+		character:PivotTo(CFrame.lookAt(position, position + Vector3.new(0, 0, 1)))
+	end
+end
+
+-- The point is inside the column above a checkpoint pad. The column is tall so a
+-- racer jumping across the pad still counts.
+local function reached(checkpoint: CourseBuilder.Checkpoint, position: Vector3): boolean
+	local offset = position - checkpoint.top
+	return math.abs(offset.X) <= checkpoint.size.X / 2 + 1
+		and math.abs(offset.Z) <= checkpoint.size.Z / 2 + 1
+		and offset.Y >= -2
+		and offset.Y <= 16
+end
+
+local function clearPlayer(player: Player)
+	player:SetAttribute("Checkpoint", nil)
+	player:SetAttribute("RespawnAt", nil)
+	player:SetAttribute("Place", nil)
+end
+
+local function countdown(state: string, seconds: number, needsPlayers: boolean): boolean
+	RoundState.set(state)
+	for t = seconds, 1, -1 do
+		RoundState.setTimeLeft(t)
+		task.wait(1)
+		if needsPlayers and #Players:GetPlayers() < Config.MinPlayers then
+			return false
+		end
+	end
+	RoundState.setTimeLeft(0)
+	return true
+end
+
+local function startPositions(count: number): { Vector3 }
+	assert(course, "no course")
+	local start = course.checkpoints[0]
+	local columns = 6
+	local positions = {}
+	for i = 0, count - 1 do
+		local column, row = i % columns, i // columns
+		local x = (column - (columns - 1) / 2) * 5
+		local z = -start.size.Z / 2 + 4 + (row % 4) * 4
+		table.insert(positions, start.top + Vector3.new(x, SPAWN_HEIGHT, z))
+	end
+	return positions
+end
+
+local function lineUp()
+	local players = Players:GetPlayers()
+	local positions = startPositions(#players)
+	for i, player in ipairs(players) do
+		if not player.Character then
+			player:LoadCharacter()
+		end
+		local racer = { checkpoint = 0 }
+		racers[player] = racer
+		setCheckpoint(player, racer, 0)
+		task.spawn(place, player, positions[i])
+	end
+end
+
+local function race(): number
+	assert(course, "no course")
+	local started = os.clock()
+	local deadline = started + Config.RaceSeconds
+	local finished = 0
+	local starters = 0
+	for _ in pairs(racers) do
+		starters += 1
+	end
+
+	while true do
+		local now = os.clock()
+		local stillRacing = 0
+		for player, racer in pairs(racers) do
+			if racer.place then
+				continue
+			end
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			local nextIndex = racer.checkpoint + 1
+			if root and reached(course.checkpoints[nextIndex], (root :: BasePart).Position) then
+				setCheckpoint(player, racer, nextIndex)
+				if nextIndex == course.stageCount then
+					finished += 1
+					racer.place = finished
+					racer.time = now - started
+					player:SetAttribute("Place", finished)
+					Remotes.get("PlayerFinished"):FireAllClients(player.DisplayName, finished, racer.time)
+					if finished == 1 then
+						deadline = math.min(deadline, now + Config.FinishWindowSeconds)
+					end
+					continue
+				end
+			end
+			stillRacing += 1
+		end
+
+		if stillRacing == 0 or now >= deadline then
+			break
+		end
+		RoundState.setTimeLeft(math.ceil(deadline - now))
+		task.wait(0.1)
+	end
+	return starters
+end
+
+local function award(starters: number)
+	assert(course, "no course")
+	local results = {}
+	for player, racer in pairs(racers) do
+		local coins
+		if racer.place then
+			coins = Config.Rewards.Places[racer.place] or Config.Rewards.Finish
+			-- A win only counts against at least one other racer.
+			if racer.place == 1 and starters >= 2 then
+				PlayerStats.add(player, "Wins", 1)
+			end
+		else
+			coins = racer.checkpoint * Config.Rewards.PerCheckpoint
+		end
+		PlayerStats.add(player, "Coins", coins)
+		table.insert(results, {
+			name = player.DisplayName,
+			place = racer.place,
+			time = racer.time,
+			checkpoint = racer.checkpoint,
+			coins = coins,
+		})
+	end
+
+	-- Finishers by place, then everyone else by how far they got.
+	table.sort(results, function(a, b)
+		if a.place and b.place then
+			return a.place < b.place
+		elseif a.place or b.place then
+			return a.place ~= nil
+		end
+		return a.checkpoint > b.checkpoint
+	end)
+	Remotes.get("RaceResults"):FireAllClients(results, course.stageCount)
+end
+
+local function cleanup()
+	for player in pairs(racers) do
+		clearPlayer(player)
+		if player.Parent then
+			player:LoadCharacter()
+		end
+	end
+	racers = {}
+	if course then
+		course.folder:Destroy()
+		course = nil
+	end
+	ReplicatedStorage:SetAttribute("RaceStartedAt", nil)
+end
+
+local function onCharacterAdded(player: Player, character: Model)
+	-- A racer who resets mid-race goes straight back to their checkpoint.
+	local racer = racers[player]
+	local state = RoundState.get()
+	if racer and (state == "Countdown" or state == "Racing") then
+		character:WaitForChild("HumanoidRootPart", 5)
+		place(player, respawnPoint(racer.checkpoint))
+	end
+end
+
+function RaceManager.start()
+	Players.RespawnTime = 1
+	Players.PlayerAdded:Connect(function(player)
+		player.CharacterAdded:Connect(function(character)
+			onCharacterAdded(player, character)
+		end)
+	end)
+	for _, player in ipairs(Players:GetPlayers()) do
+		player.CharacterAdded:Connect(function(character)
+			onCharacterAdded(player, character)
+		end)
+	end
+	Players.PlayerRemoving:Connect(function(player)
+		racers[player] = nil
+	end)
+
+	task.spawn(function()
+		while true do
+			RoundState.set("Waiting")
+			while #Players:GetPlayers() < Config.MinPlayers do
+				task.wait(1)
+			end
+
+			-- Build now so the course streams to clients during intermission.
+			course = CourseBuilder.build(os.time())
+			if not countdown("Intermission", Config.IntermissionSeconds, true) then
+				cleanup()
+				continue
+			end
+
+			lineUp()
+			countdown("Countdown", Config.CountdownSeconds, false)
+			assert(course, "no course").gate:Destroy()
+			ReplicatedStorage:SetAttribute("RaceStartedAt", workspace:GetServerTimeNow())
+			RoundState.set("Racing")
+
+			local starters = race()
+
+			RoundState.set("Ended")
+			award(starters)
+			task.wait(Config.EndScreenSeconds)
+			cleanup()
+		end
+	end)
+end
+
+return RaceManager
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX5">
+      <Properties>
+        <string name="Name">RoundState</string>
+        <ProtectedString name="Source"><![CDATA[-- Single source of truth for race state, stored as attributes on ReplicatedStorage
+-- so the client HUD can read it without extra remotes.
+--   State: "Waiting" | "Intermission" | "Countdown" | "Racing" | "Ended"
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RoundState = {}
+
+function RoundState.set(state: string)
+	ReplicatedStorage:SetAttribute("State", state)
+end
+
+function RoundState.get(): string?
+	return ReplicatedStorage:GetAttribute("State")
+end
+
+function RoundState.setTimeLeft(seconds: number)
+	ReplicatedStorage:SetAttribute("TimeLeft", seconds)
+end
+
+return RoundState
+]]></ProtectedString>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

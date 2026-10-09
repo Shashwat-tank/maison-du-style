@@ -11,7 +11,7 @@
 --   4. Test tab -> Clients and Servers -> Players: 2 -> Start.
 --
 -- If the paste collapses into one line, the Command Bar has stripped the
--- newlines and this will not work. Use the .rbxmx files in tools/rbxmx instead.
+-- newlines and this will not work. Use the .rbxmx files next to this one instead.
 --
 -- Re-running this is safe: it replaces its own previous install. It never
 -- touches Workspace, so a map you built yourself is left alone.

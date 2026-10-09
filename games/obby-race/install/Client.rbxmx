@@ -1,0 +1,412 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="LocalScript" referent="RBX4">
+    <Properties>
+      <string name="Name">Client</string>
+      <ProtectedString name="Source"><![CDATA[local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Remotes = require(ReplicatedStorage:WaitForChild("Shared").Remotes)
+
+local HUD = require(script.HUD)
+local HazardWatcher = require(script.HazardWatcher)
+local ObstacleAnimator = require(script.ObstacleAnimator)
+
+local hud = HUD.init()
+ObstacleAnimator.start()
+HazardWatcher.start(hud.onReset)
+
+Remotes.get("PlayerFinished").OnClientEvent:Connect(hud.onPlayerFinished)
+Remotes.get("RaceResults").OnClientEvent:Connect(hud.showResults)
+]]></ProtectedString>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX1">
+      <Properties>
+        <string name="Name">HUD</string>
+        <ProtectedString name="Source"><![CDATA[local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Config = require(ReplicatedStorage:WaitForChild("Shared").Config)
+
+local HUD = {}
+
+local player = Players.LocalPlayer
+
+local WHITE = Color3.new(1, 1, 1)
+local PANEL = Color3.fromRGB(20, 20, 28)
+local GREEN = Color3.fromRGB(110, 230, 140)
+local GOLD = Color3.fromRGB(255, 205, 70)
+
+local function make(className: string, props: { [string]: any }, parent: Instance): any
+	local instance = Instance.new(className)
+	for key, value in pairs(props) do
+		instance[key] = value
+	end
+	instance.Parent = parent
+	return instance
+end
+
+local function panel(props: { [string]: any }, parent: Instance): TextLabel
+	props.BackgroundColor3 = props.BackgroundColor3 or PANEL
+	props.BackgroundTransparency = props.BackgroundTransparency or 0.3
+	props.TextColor3 = props.TextColor3 or WHITE
+	props.Font = props.Font or Enum.Font.GothamBold
+	props.TextSize = props.TextSize or 18
+	props.TextWrapped = true
+	local label = make("TextLabel", props, parent)
+	make("UICorner", { CornerRadius = UDim.new(0, 8) }, label)
+	return label
+end
+
+local function ordinal(n: number): string
+	local lastTwo = n % 100
+	if lastTwo >= 11 and lastTwo <= 13 then
+		return n .. "th"
+	end
+	return n .. (({ "st", "nd", "rd" })[n % 10] or "th")
+end
+
+local function clock(seconds: number): string
+	return string.format("%d:%04.1f", seconds // 60, seconds % 60)
+end
+
+local function stageNames(): { string }
+	return string.split(ReplicatedStorage:GetAttribute("StageNames") or "", "|")
+end
+
+function HUD.init()
+	local gui = make("ScreenGui", { Name = "ObbyHUD", ResetOnSpawn = false }, player:WaitForChild("PlayerGui"))
+
+	local status = panel({
+		Size = UDim2.fromOffset(380, 40),
+		Position = UDim2.new(0.5, 0, 0, 12),
+		AnchorPoint = Vector2.new(0.5, 0),
+	}, gui)
+
+	-- Top-left: the top-right belongs to Roblox's player list.
+	local stage = panel({
+		Size = UDim2.fromOffset(240, 56),
+		Position = UDim2.new(0, 12, 0, 12),
+		Visible = false,
+	}, gui)
+
+	local bigText = make("TextLabel", {
+		Size = UDim2.fromOffset(400, 140),
+		Position = UDim2.fromScale(0.5, 0.35),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 110,
+		TextColor3 = WHITE,
+		TextStrokeTransparency = 0.2,
+		Visible = false,
+	}, gui)
+
+	local toast = panel({
+		Size = UDim2.fromOffset(380, 36),
+		Position = UDim2.new(0.5, 0, 1, -90),
+		AnchorPoint = Vector2.new(0.5, 1),
+		TextSize = 16,
+		Visible = false,
+	}, gui)
+
+	local results = panel({
+		BackgroundTransparency = 0.1,
+		Size = UDim2.fromOffset(420, 300),
+		Position = UDim2.fromScale(0.5, 0.45),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Font = Enum.Font.GothamMedium,
+		TextSize = 18,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		RichText = true,
+		Visible = false,
+	}, gui)
+	make("UIPadding", {
+		PaddingTop = UDim.new(0, 16),
+		PaddingLeft = UDim.new(0, 20),
+		PaddingRight = UDim.new(0, 20),
+	}, results)
+
+	-- Each timed message gets a token so an older timer can't hide a newer one.
+	local tokens = {}
+	local function showFor(label: GuiObject, seconds: number)
+		tokens[label] = (tokens[label] or 0) + 1
+		local token = tokens[label]
+		label.Visible = true
+		task.delay(seconds, function()
+			if tokens[label] == token then
+				label.Visible = false
+			end
+		end)
+	end
+
+	local function showToast(message: string, color: Color3?)
+		toast.Text = message
+		toast.TextColor3 = color or WHITE
+		showFor(toast, 3)
+	end
+
+	local function isRacing(): boolean
+		local state = ReplicatedStorage:GetAttribute("State")
+		return player:GetAttribute("Checkpoint") ~= nil and (state == "Countdown" or state == "Racing")
+	end
+
+	local function refreshStage()
+		local checkpoint = player:GetAttribute("Checkpoint")
+		local count = ReplicatedStorage:GetAttribute("StageCount") or Config.StageCount
+		stage.Visible = isRacing()
+		if not checkpoint then
+			return
+		end
+		local place = player:GetAttribute("Place")
+		if place then
+			stage.Text = "FINISHED\n" .. ordinal(place) .. " place"
+			stage.TextColor3 = GOLD
+		else
+			local current = math.min(checkpoint + 1, count)
+			stage.Text = string.format("Stage %d / %d\n%s", current, count, stageNames()[current] or "")
+			stage.TextColor3 = WHITE
+		end
+	end
+
+	local function statusText(): string
+		local state = ReplicatedStorage:GetAttribute("State")
+		local timeLeft = ReplicatedStorage:GetAttribute("TimeLeft") or 0
+		if state == "Waiting" then
+			return string.format("Waiting for players (%d/%d)", #Players:GetPlayers(), Config.MinPlayers)
+		elseif state == "Intermission" then
+			return string.format("Next race in %d", timeLeft)
+		elseif state == "Countdown" then
+			return "Get ready..."
+		elseif state == "Racing" then
+			local left = string.format("%d:%02d left", timeLeft // 60, timeLeft % 60)
+			local startedAt = ReplicatedStorage:GetAttribute("RaceStartedAt")
+			if isRacing() and not player:GetAttribute("Place") and startedAt then
+				return clock(workspace:GetServerTimeNow() - startedAt) .. "   |   " .. left
+			end
+			return "Race in progress   |   " .. left
+		elseif state == "Ended" then
+			return "Race over"
+		end
+		return "Connecting..."
+	end
+
+	RunService.Heartbeat:Connect(function()
+		status.Text = statusText()
+	end)
+
+	ReplicatedStorage:GetAttributeChangedSignal("State"):Connect(function()
+		local state = ReplicatedStorage:GetAttribute("State")
+		refreshStage()
+		if state == "Racing" and player:GetAttribute("Checkpoint") ~= nil then
+			bigText.Text = "GO!"
+			bigText.TextColor3 = GREEN
+			showFor(bigText, 1)
+		elseif state ~= "Countdown" then
+			bigText.Visible = false
+		end
+	end)
+
+	ReplicatedStorage:GetAttributeChangedSignal("TimeLeft"):Connect(function()
+		if ReplicatedStorage:GetAttribute("State") == "Countdown" and isRacing() then
+			local timeLeft = ReplicatedStorage:GetAttribute("TimeLeft")
+			if timeLeft and timeLeft > 0 then
+				bigText.Text = tostring(timeLeft)
+				bigText.TextColor3 = WHITE
+				showFor(bigText, 1.2)
+			end
+		end
+	end)
+
+	local lastCheckpoint = 0
+	player:GetAttributeChangedSignal("Checkpoint"):Connect(function()
+		local checkpoint = player:GetAttribute("Checkpoint")
+		local count = ReplicatedStorage:GetAttribute("StageCount") or Config.StageCount
+		if checkpoint and checkpoint > lastCheckpoint and checkpoint < count then
+			showToast(string.format("Checkpoint!  Stage %d / %d", checkpoint + 1, count), GREEN)
+		end
+		lastCheckpoint = checkpoint or 0
+		refreshStage()
+	end)
+	player:GetAttributeChangedSignal("Place"):Connect(refreshStage)
+
+	local api = {}
+
+	function api.onReset()
+		showToast("Oops! Back to your checkpoint")
+	end
+
+	function api.onPlayerFinished(name: string, place: number, seconds: number)
+		local color = place == 1 and GOLD or WHITE
+		showToast(string.format("%s finished %s  (%s)", name, ordinal(place), clock(seconds)), color)
+	end
+
+	function api.showResults(list: { any }, stageCount: number)
+		local lines = { '<font size="26"><b>Race results</b></font>', "" }
+		for i, entry in ipairs(list) do
+			if i > 8 then
+				table.insert(lines, string.format("...and %d more", #list - 8))
+				break
+			end
+			local left = entry.place and ordinal(entry.place) or "DNF"
+			local right = entry.place and clock(entry.time)
+				or string.format("stage %d/%d", math.min(entry.checkpoint + 1, stageCount), stageCount)
+			local line = string.format("<b>%s</b>   %s   <i>%s</i>   +%d coins", left, entry.name, right, entry.coins)
+			if entry.name == player.DisplayName then
+				line = '<font color="#FFCD46">' .. line .. "</font>"
+			end
+			table.insert(lines, line)
+		end
+		results.Text = table.concat(lines, "\n")
+		showFor(results, Config.EndScreenSeconds)
+		stage.Visible = false
+	end
+
+	return api
+end
+
+return HUD
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX2">
+      <Properties>
+        <string name="Name">HazardWatcher</string>
+        <ProtectedString name="Source"><![CDATA[-- Sends the local character back to its checkpoint when it touches a hazard or
+-- falls off the course. This runs on the client because obstacles move on the
+-- client (see ObstacleAnimator), and it is safe to trust: the only thing a
+-- client can do with it is send itself backwards.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local HazardWatcher = {}
+
+local player = Players.LocalPlayer
+
+local FALL_DEPTH = 30
+-- Roughly the character's body, from just below the feet to the head.
+local BODY_SIZE = Vector3.new(2.6, 5.4, 2.2)
+local BODY_OFFSET = CFrame.new(0, -0.6, 0)
+local RESET_COOLDOWN = 0.5
+
+function HazardWatcher.start(onReset: () -> ())
+	local overlap = OverlapParams.new()
+	overlap.FilterType = Enum.RaycastFilterType.Exclude
+	local lastReset = 0
+
+	RunService.Heartbeat:Connect(function()
+		local respawnAt = player:GetAttribute("RespawnAt")
+		local character = player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if typeof(respawnAt) ~= "Vector3" or not root or os.clock() - lastReset < RESET_COOLDOWN then
+			return
+		end
+
+		local hit = root.Position.Y < respawnAt.Y - FALL_DEPTH
+		if not hit then
+			overlap.FilterDescendantsInstances = { character :: Model }
+			for _, part in ipairs(workspace:GetPartBoundsInBox(root.CFrame * BODY_OFFSET, BODY_SIZE, overlap)) do
+				if part:GetAttribute("Hazard") then
+					hit = true
+					break
+				end
+			end
+		end
+		if not hit then
+			return
+		end
+
+		lastReset = os.clock()
+		local target = respawnAt + Vector3.new(math.random(-4, 4), 0, math.random(-2, 2))
+		;(character :: Model):PivotTo(CFrame.lookAt(target, target + Vector3.new(0, 0, 1)))
+		root.AssemblyLinearVelocity = Vector3.zero
+		onReset()
+	end)
+end
+
+return HazardWatcher
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX3">
+      <Properties>
+        <string name="Name">ObstacleAnimator</string>
+        <ProtectedString name="Source"><![CDATA[-- Animates the course's moving obstacles locally. Every client derives the same
+-- motion from the shared server clock, so everyone sees the obstacles in the
+-- same place without the server streaming positions every frame.
+--
+-- Parts are picked up as they stream in, and dropped when they leave.
+local RunService = game:GetService("RunService")
+
+local ObstacleAnimator = {}
+
+type Tracked = {
+	kind: string,
+	base: CFrame,
+	speed: number,
+	period: number,
+	phase: number,
+	onFraction: number,
+}
+
+local tracked: { [BasePart]: Tracked } = {}
+
+-- How long before a vanishing tile disappears it starts to flicker.
+local WARNING_SECONDS = 0.5
+
+local function track(instance: Instance)
+	if not instance:IsA("BasePart") then
+		return
+	end
+	local kind = instance:GetAttribute("Anim")
+	if not kind then
+		return
+	end
+	tracked[instance] = {
+		kind = kind,
+		base = instance.CFrame,
+		speed = instance:GetAttribute("Speed") or 0,
+		period = instance:GetAttribute("Period") or 1,
+		phase = instance:GetAttribute("Phase") or 0,
+		onFraction = instance:GetAttribute("OnFraction") or 0.5,
+	}
+end
+
+local function update()
+	local now = workspace:GetServerTimeNow()
+	for part, info in pairs(tracked) do
+		if info.kind == "Spin" then
+			part.CFrame = info.base * CFrame.Angles(0, math.rad((now * info.speed) % 360), 0)
+		else
+			local cycle = (now / info.period + info.phase) % 1
+			local on = cycle < info.onFraction
+			if info.kind == "Fade" then
+				local warning = on and cycle > info.onFraction - WARNING_SECONDS / info.period
+				part.CanCollide = on
+				part.Transparency = if not on then 0.85 elseif warning then 0.45 else 0
+			elseif info.kind == "Laser" then
+				-- CanQuery off takes the beam out of the hazard check while it is dark.
+				part.CanQuery = on
+				part.Transparency = if on then 0.2 else 0.92
+			end
+		end
+	end
+end
+
+function ObstacleAnimator.start()
+	for _, descendant in ipairs(workspace:GetDescendants()) do
+		track(descendant)
+	end
+	workspace.DescendantAdded:Connect(track)
+	workspace.DescendantRemoving:Connect(function(descendant)
+		tracked[descendant :: BasePart] = nil
+	end)
+	RunService.RenderStepped:Connect(update)
+end
+
+return ObstacleAnimator
+]]></ProtectedString>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>
